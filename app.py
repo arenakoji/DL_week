@@ -1,416 +1,263 @@
-"""
-Learning GPS AI — Streamlit App
-"""
+from typing import Any, Dict, List, Tuple
 
-import json
+import pandas as pd
 import streamlit as st
+
 from logic import (
-    compute_skill_states,
-    get_weak_topics,
-    allocate_time,
-    run_all_simulations,
-    generate_explanation,
     SAMPLE_DATA,
+    SCENARIO_PRESETS,
+    parse_events_json,
+    preview_rows,
+    run_learning_gps,
+    sanitize_events,
+    to_json_text,
 )
 
-# ─────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="Learning GPS AI",
-    page_icon="🧭",
-    layout="wide",
+st.set_page_config(page_title="Learning GPS AI", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.2rem;
+        padding-bottom: 2rem;
+    }
+    .plan-card {
+        border: 1px solid #d0dae8;
+        border-radius: 12px;
+        padding: 12px;
+        background: linear-gradient(180deg, #f9fbff 0%, #f4f8ff 100%);
+        min-height: 160px;
+    }
+    .plan-card.recommended {
+        border: 2px solid #0f766e;
+        background: linear-gradient(180deg, #ecfeff 0%, #e6fffa 100%);
+        box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.12);
+    }
+    .plan-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+    .muted {
+        color: #475569;
+        font-size: 0.88rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-# ─────────────────────────────────────────────
-# CUSTOM CSS
-# ─────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;600;700&display=swap');
+if "analysis_result" not in st.session_state:
+    st.session_state["analysis_result"] = None
+if "json_input" not in st.session_state:
+    st.session_state["json_input"] = to_json_text(SAMPLE_DATA)
 
-html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
-}
+st.title("Learning GPS AI")
+st.caption(
+    "AI learning copilot with mastery tracking, behavior signals, and counterfactual forecasting of study strategies."
+)
 
-/* Background */
-.stApp {
-    background: #0d0f1a;
-    color: #e8eaf0;
-}
+st.sidebar.header("Controls")
+study_time = st.sidebar.slider("Total study time (minutes)", min_value=30, max_value=180, value=90, step=5)
+weak_topics_n = st.sidebar.slider("Number of weak topics", min_value=2, max_value=5, value=3, step=1)
+use_sample_data = st.sidebar.checkbox("Use sample data", value=True)
+scenario_options = ["Custom JSON"] + list(SCENARIO_PRESETS.keys())
+scenario_choice = st.sidebar.selectbox("Demo scenario preset", options=scenario_options, index=0)
 
-/* Hero Header */
-.hero {
-    background: linear-gradient(135deg, #1a1d2e 0%, #0d1117 50%, #0f1a2e 100%);
-    border: 1px solid #2a2d3e;
-    border-radius: 16px;
-    padding: 2.5rem 3rem;
-    margin-bottom: 2rem;
-    position: relative;
-    overflow: hidden;
-}
-.hero::before {
-    content: '';
-    position: absolute;
-    top: -50%;
-    right: -20%;
-    width: 400px;
-    height: 400px;
-    background: radial-gradient(circle, rgba(99,179,237,0.08) 0%, transparent 70%);
-    pointer-events: none;
-}
-.hero h1 {
-    font-family: 'Space Mono', monospace;
-    font-size: 2.4rem;
-    font-weight: 700;
-    color: #63b3ed;
-    margin: 0 0 0.4rem 0;
-    letter-spacing: -1px;
-}
-.hero p {
-    color: #8892a4;
-    font-size: 1.05rem;
-    margin: 0;
-}
-.hero .badge {
-    display: inline-block;
-    background: rgba(99,179,237,0.12);
-    border: 1px solid rgba(99,179,237,0.3);
-    color: #63b3ed;
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 0.75rem;
-    font-family: 'Space Mono', monospace;
-    margin-bottom: 0.8rem;
-}
+if st.sidebar.button("Load preset into JSON"):
+    if scenario_choice == "Custom JSON":
+        st.sidebar.info("Pick one of the 3 demo scenarios first.")
+    else:
+        st.session_state["json_input"] = to_json_text(SCENARIO_PRESETS[scenario_choice])
 
-/* Cards */
-.card {
-    background: #13162a;
-    border: 1px solid #2a2d3e;
-    border-radius: 12px;
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-}
-.card-title {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-    color: #63b3ed;
-    margin-bottom: 1rem;
-}
+json_text = st.sidebar.text_area("Paste events JSON", key="json_input", height=320)
 
-/* Weakness items */
-.weak-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: #1a1d2e;
-    border-left: 3px solid #fc8181;
-    border-radius: 0 8px 8px 0;
-    padding: 0.7rem 1rem;
-    margin-bottom: 0.5rem;
-}
-.weak-label { font-weight: 600; font-size: 0.95rem; color: #e8eaf0; }
-.weak-score { font-family: 'Space Mono', monospace; font-size: 0.85rem; color: #fc8181; }
+openai_key = st.sidebar.text_input("OpenAI API key (optional)", type="password")
+model_choice = st.sidebar.selectbox(
+    "OpenAI model",
+    options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
+    index=0,
+)
 
-/* Progress bar */
-.prog-wrap { margin-bottom: 0.8rem; }
-.prog-label { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 4px; color: #8892a4; }
-.prog-bar-bg { background: #1e2235; border-radius: 99px; height: 8px; }
-.prog-bar-fill { height: 8px; border-radius: 99px; transition: width 0.5s ease; }
-
-/* Plan cards */
-.plan-card {
-    background: #13162a;
-    border: 1px solid #2a2d3e;
-    border-radius: 12px;
-    padding: 1.2rem 1.4rem;
-    height: 100%;
-}
-.plan-card.best {
-    border-color: #63b3ed;
-    background: linear-gradient(135deg, #13162a, #0f1a2e);
-}
-.plan-gain {
-    font-family: 'Space Mono', monospace;
-    font-size: 2rem;
-    font-weight: 700;
-    margin: 0.5rem 0 0.2rem;
-}
-.plan-gain.high { color: #68d391; }
-.plan-gain.mid  { color: #63b3ed; }
-.plan-gain.low  { color: #fbb6ce; }
-
-/* Explanation box */
-.explain-box {
-    background: linear-gradient(135deg, #0f1a2e, #1a1d2e);
-    border: 1px solid rgba(99,179,237,0.3);
-    border-radius: 12px;
-    padding: 1.5rem;
-    color: #c7d2e0;
-    line-height: 1.7;
-    font-size: 0.97rem;
-}
-
-/* Section headers */
-h2.section-head {
-    font-family: 'Space Mono', monospace;
-    font-size: 1rem;
-    color: #63b3ed;
-    border-bottom: 1px solid #2a2d3e;
-    padding-bottom: 0.5rem;
-    margin: 1.5rem 0 1rem;
-}
-
-/* Streamlit overrides */
-.stButton > button {
-    background: linear-gradient(135deg, #2563eb, #1d4ed8);
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 0.6rem 2rem;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.85rem;
-    letter-spacing: 1px;
-    width: 100%;
-    cursor: pointer;
-}
-.stButton > button:hover {
-    background: linear-gradient(135deg, #3b82f6, #2563eb);
-}
-.stTextArea textarea {
-    background: #1a1d2e !important;
-    color: #e8eaf0 !important;
-    border: 1px solid #2a2d3e !important;
-    border-radius: 8px !important;
-    font-family: 'Space Mono', monospace !important;
-    font-size: 0.82rem !important;
-}
-.stSlider [data-baseweb="slider"] { padding: 0; }
-label { color: #8892a4 !important; font-size: 0.85rem !important; }
-.stSelectbox div[data-baseweb="select"] {
-    background: #1a1d2e !important;
-    border-color: #2a2d3e !important;
-}
-</style>
-""", unsafe_allow_html=True)
+generate_clicked = st.sidebar.button("Generate Plan", type="primary")
 
 
-# ─────────────────────────────────────────────
-# HERO HEADER
-# ─────────────────────────────────────────────
-st.markdown("""
-<div class="hero">
-  <div class="badge">🧭 AI-POWERED</div>
-  <h1>Learning GPS AI</h1>
-  <p>Detect skill gaps → Build your optimal study plan → Predict your improvement</p>
-</div>
-""", unsafe_allow_html=True)
+def resolve_input_data(
+    use_sample: bool,
+    scenario: str,
+    raw_json_text: str,
+) -> Tuple[List[Dict[str, Any]], List[str], str]:
+    if use_sample:
+        events, messages = sanitize_events(SAMPLE_DATA)
+        return events, messages, "Sample data"
+
+    if scenario != "Custom JSON":
+        events, messages = sanitize_events(SCENARIO_PRESETS[scenario])
+        return events, messages, scenario
+
+    events, messages = parse_events_json(raw_json_text)
+    return events, messages, "Custom JSON"
 
 
-# ─────────────────────────────────────────────
-# SIDEBAR — INPUTS
-# ─────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### ⚙️ Configuration")
-    
-    openai_key = st.text_input(
-        "OpenAI API Key (optional)",
-        type="password",
-        help="Leave blank to use built-in heuristic explanation",
-    )
-    
-    study_time = st.slider(
-        "Available study time (minutes)",
-        min_value=30,
-        max_value=180,
-        value=90,
-        step=15,
-    )
+preview_events, preview_messages, source_label = resolve_input_data(
+    use_sample=use_sample_data,
+    scenario=scenario_choice,
+    raw_json_text=json_text,
+)
 
-    recommended_plan_choice = st.selectbox(
-        "Plan to explain",
-        options=["A — Deep Focus", "B — Balanced", "C — Light Review"],
-        index=0,
-    )
-    plan_letter = recommended_plan_choice[0]
+st.subheader("Input Preview")
+st.caption(f"Active source: {source_label}")
 
-    st.markdown("---")
-    st.markdown("### 📥 Performance Data")
-    
-    use_sample = st.checkbox("Use sample data", value=True)
+if preview_messages:
+    st.warning("Validation notes:\n- " + "\n- ".join(preview_messages[:8]))
 
-    default_json = json.dumps(SAMPLE_DATA, indent=2)
-    raw_input = st.text_area(
-        "Or paste JSON below:",
-        value=default_json if use_sample else "[]",
-        height=300,
-    )
-
-    generate_btn = st.button("🚀 GENERATE PLAN")
-
-
-# ─────────────────────────────────────────────
-# MAIN OUTPUT
-# ─────────────────────────────────────────────
-if generate_btn:
-    # Parse input
-    try:
-        performance_data = json.loads(raw_input)
-        if not isinstance(performance_data, list) or len(performance_data) == 0:
-            st.error("Please provide a non-empty JSON array of performance events.")
-            st.stop()
-    except json.JSONDecodeError as e:
-        st.error(f"Invalid JSON: {e}")
-        st.stop()
-
-    # Run logic
-    skill_states = compute_skill_states(performance_data)
-    weak_topics  = get_weak_topics(skill_states, n=3)
-    time_plan    = allocate_time(skill_states, study_time)
-    simulations  = run_all_simulations(skill_states, weak_topics)
-    explanation  = generate_explanation(skill_states, weak_topics, plan_letter, openai_key)
-
-    # ── SECTION 1: All Skills + Weak Topics ──────────────────────────────
-    col1, col2 = st.columns([1, 1], gap="large")
-
-    with col1:
-        st.markdown('<h2 class="section-head">📊 Section 1 — Skill Map</h2>', unsafe_allow_html=True)
-        
-        sorted_skills = sorted(skill_states.items(), key=lambda x: x[1])
-        for topic, mastery in sorted_skills:
-            pct = round(mastery * 100)
-            if pct < 45:
-                color, icon = "#fc8181", "🔴"
-            elif pct < 65:
-                color, icon = "#f6ad55", "🟡"
-            else:
-                color, icon = "#68d391", "🟢"
-
-            st.markdown(f"""
-            <div class="prog-wrap">
-                <div class="prog-label">
-                    <span>{icon} {topic.title()}</span>
-                    <span style="font-family:'Space Mono',monospace;color:{color}">{pct}%</span>
-                </div>
-                <div class="prog-bar-bg">
-                    <div class="prog-bar-fill" style="width:{pct}%;background:{color}"></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    with col2:
-        st.markdown('<h2 class="section-head">🎯 Section 1 — Weak Topics</h2>', unsafe_allow_html=True)
-        
-        for i, (topic, mastery) in enumerate(weak_topics):
-            rank = ["🥇", "🥈", "🥉"][i] if i < 3 else f"#{i+1}"
-            st.markdown(f"""
-            <div class="weak-item">
-                <span class="weak-label">{rank} {topic.title()}</span>
-                <span class="weak-score">{round(mastery*100)}% mastery</span>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<h2 class="section-head">⏱️ Section 2 — Time Allocation</h2>', unsafe_allow_html=True)
-
-        for topic, mins in sorted(time_plan.items(), key=lambda x: -x[1]):
-            pct_bar = round((mins / study_time) * 100)
-            mastery = skill_states.get(topic, 0.5)
-            pct_m   = round(mastery * 100)
-            st.markdown(f"""
-            <div class="prog-wrap">
-                <div class="prog-label">
-                    <span>{topic.title()}</span>
-                    <span style="font-family:'Space Mono',monospace">{mins} min</span>
-                </div>
-                <div class="prog-bar-bg">
-                    <div class="prog-bar-fill" style="width:{pct_bar}%;background:#63b3ed"></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # ── SECTION 3: Simulated Plans ────────────────────────────────────────
-    st.markdown('<h2 class="section-head">🔮 Section 3 — Predicted Outcomes</h2>', unsafe_allow_html=True)
-
-    plan_cols = st.columns(3, gap="medium")
-    gain_colors = ["high", "mid", "low"]
-    
-    for i, (sim, col) in enumerate(zip(simulations, plan_cols)):
-        is_best = sim["plan"] == plan_letter
-        card_class = "plan-card best" if is_best else "plan-card"
-        badge = "⭐ RECOMMENDED" if is_best else ""
-        gain_class = gain_colors[i]
-
-        # Build topic breakdown HTML
-        breakdown_html = ""
-        for topic, data in sim["improvements"].items():
-            breakdown_html += f"""
-            <div style="display:flex;justify-content:space-between;font-size:0.8rem;padding:4px 0;border-bottom:1px solid #2a2d3e;">
-                <span style="color:#8892a4">{topic.title()}</span>
-                <span style="font-family:'Space Mono',monospace;color:#68d391">+{data['gain']}%</span>
-            </div>"""
-
-        col.markdown(f"""
-        <div class="{card_class}">
-            <div style="font-size:0.65rem;font-family:'Space Mono',monospace;letter-spacing:2px;color:#63b3ed;margin-bottom:0.3rem">PLAN {sim['plan']} {badge}</div>
-            <div style="font-size:0.9rem;font-weight:600;color:#e8eaf0;margin-bottom:0.5rem">{sim['label']}</div>
-            <div class="plan-gain {gain_class}">+{sim['avg_gain_pct']}%</div>
-            <div style="font-size:0.75rem;color:#8892a4;margin-bottom:1rem">avg. expected gain</div>
-            {breakdown_html}
-            <div style="margin-top:0.8rem;font-size:0.75rem;color:#8892a4">{sim['burnout_note']}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # ── SECTION 4: Explanation ─────────────────────────────────────────────
-    st.markdown('<h2 class="section-head">🤖 Section 4 — AI Explanation</h2>', unsafe_allow_html=True)
-
-    st.markdown(f"""
-    <div class="explain-box">
-        <div style="font-size:0.7rem;font-family:'Space Mono',monospace;letter-spacing:2px;color:#63b3ed;margin-bottom:0.8rem">
-            WHY PLAN {plan_letter}?
-        </div>
-        {explanation.replace(chr(10), '<br>')}
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── Summary stats ──────────────────────────────────────────────────────
-    st.markdown("<br>", unsafe_allow_html=True)
-    m1, m2, m3, m4 = st.columns(4)
-    avg_mastery = round(sum(skill_states.values()) / len(skill_states) * 100, 1)
-    best_gain   = max(s["avg_gain_pct"] for s in simulations)
-    weakest_pct = round(weak_topics[0][1] * 100) if weak_topics else 0
-    
-    for metric_col, label, value, color in [
-        (m1, "Topics Tracked",    len(skill_states), "#63b3ed"),
-        (m2, "Avg Mastery",       f"{avg_mastery}%",   "#f6ad55"),
-        (m3, "Weakest Topic",     f"{weakest_pct}%",   "#fc8181"),
-        (m4, "Best Plan Gain",    f"+{best_gain}%",    "#68d391"),
-    ]:
-        metric_col.markdown(f"""
-        <div class="card" style="text-align:center">
-            <div style="font-size:1.8rem;font-weight:700;color:{color};font-family:'Space Mono',monospace">{value}</div>
-            <div style="font-size:0.75rem;color:#8892a4;margin-top:4px">{label}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+if preview_events:
+    preview_df = pd.DataFrame(preview_rows(preview_events))
+    st.dataframe(preview_df, use_container_width=True, hide_index=True)
 else:
-    # Landing state
-    st.markdown("""
-    <div style="text-align:center;padding:4rem 2rem;color:#4a5568">
-        <div style="font-size:4rem;margin-bottom:1rem">🧭</div>
-        <div style="font-family:'Space Mono',monospace;font-size:1rem;color:#63b3ed;margin-bottom:0.5rem">READY TO NAVIGATE</div>
-        <div style="color:#8892a4;font-size:0.9rem">Configure your settings in the sidebar, then click <strong style="color:#63b3ed">Generate Plan</strong></div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("No valid events to preview yet. Add valid JSON or enable sample data.")
 
-    # Show sample data preview
-    with st.expander("📋 View Sample Data Format", expanded=False):
-        st.code(json.dumps(SAMPLE_DATA[:4], indent=2), language="json")
-        st.caption("Full sample includes 12 events across 6 topics.")
+if generate_clicked:
+    raw_events = preview_rows(preview_events)
+    result = run_learning_gps(
+        events=raw_events,
+        study_minutes=study_time,
+        weak_topics_n=weak_topics_n,
+        openai_api_key=openai_key.strip() or None,
+        model=model_choice,
+    )
+    st.session_state["analysis_result"] = result
+
+result = st.session_state.get("analysis_result")
+
+if result is None:
+    st.info("Click Generate Plan to run mastery modeling, forecasting, and recommendations.")
+    st.stop()
+
+if result.get("errors"):
+    st.error("\n".join(result["errors"]))
+
+if result.get("validation_messages"):
+    with st.expander("Validation details"):
+        st.markdown("- " + "\n- ".join(result["validation_messages"]))
+
+skill_states = result.get("skill_states", {})
+weak_topics = result.get("weak_topics", [])
+time_allocation = result.get("time_allocation", {})
+behavior = result.get("behavior", {})
+drift = result.get("drift", {})
+simulations = result.get("simulations", {})
+recommended_plan = result.get("recommended_plan")
+
+st.subheader("1) Skill Map")
+if skill_states:
+    skill_df = pd.DataFrame(
+        [{"topic": topic, "mastery": mastery} for topic, mastery in skill_states.items()]
+    ).sort_values("mastery", ascending=True)
+    st.bar_chart(skill_df.set_index("topic"))
+else:
+    st.info("Skill map unavailable. Add valid events and generate again.")
+
+st.subheader("2) Weak Topics")
+if weak_topics:
+    weak_df = pd.DataFrame(
+        [
+            {"topic": topic, "mastery": round(mastery, 3), "mastery_pct": f"{mastery * 100:.1f}%"}
+            for topic, mastery in weak_topics
+        ]
+    )
+    st.dataframe(weak_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No weak topic list available.")
+
+st.subheader("3) Time Allocation")
+if time_allocation:
+    alloc_df = pd.DataFrame(
+        [{"topic": topic, "minutes": minutes} for topic, minutes in time_allocation.items()]
+    )
+    st.dataframe(alloc_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No allocation generated.")
+
+st.subheader("4) Behavior Insights")
+metric_cols = st.columns(3)
+metric_cols[0].metric("Fast guess rate", f"{behavior.get('fast_guess_rate', 0) * 100:.1f}%")
+metric_cols[1].metric(
+    "Late-night error rate",
+    f"{behavior.get('late_night_error_rate', 0) * 100:.1f}%",
+)
+metric_cols[2].metric("Fatigue slope", f"{behavior.get('fatigue_slope', 0):+.2f}")
+
+behavior_notes = behavior.get("notes", ["No behavior notes available."])
+st.markdown("- " + "\n- ".join(behavior_notes))
+st.info("Tip: " + behavior.get("tip", "No behavior tip available."))
+
+st.subheader("5) Drift / Inactivity")
+inactivity_days = drift.get("inactivity_days")
+if inactivity_days is None:
+    st.metric("Inactivity days", "N/A")
+else:
+    st.metric("Inactivity days", str(inactivity_days))
+
+if drift.get("inactivity_flag"):
+    st.warning("Inactivity flag triggered (>= 7 days between the latest two sessions).")
+
+regression_topics = drift.get("regression_topics", [])
+if regression_topics:
+    st.markdown("Regression topics: " + ", ".join(regression_topics))
+else:
+    st.markdown("Regression topics: none")
+
+st.markdown("- " + "\n- ".join(drift.get("notes", ["No drift notes available."])))
+
+st.subheader("6) Predicted Outcomes: Plan A vs B vs C")
+st.caption("Counterfactual simulation shows expected mastery gains under each strategy.")
+
+plan_cols = st.columns(3)
+for idx, plan_id in enumerate(["A", "B", "C"]):
+    plan = simulations.get(plan_id)
+    with plan_cols[idx]:
+        if not plan:
+            st.info(f"Plan {plan_id} unavailable.")
+            continue
+
+        card_class = "plan-card recommended" if plan_id == recommended_plan else "plan-card"
+        st.markdown(
+            (
+                f"<div class='{card_class}'>"
+                f"<div class='plan-title'>Plan {plan_id}: {plan['name']}</div>"
+                f"<div class='muted'>{plan['burnout_note']}</div>"
+                f"<div class='muted'>Focus: {', '.join(plan['focus_topics'])}</div>"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+        if plan_id == recommended_plan:
+            st.success("Recommended")
+
+        st.metric("Avg gain (focused)", f"{plan['avg_gain_pct']:.2f}%")
+        st.metric("Utility", f"{plan.get('utility', 0):.2f}")
+        st.caption(
+            f"Burnout cost: {plan.get('adjusted_burnout_cost', plan.get('base_burnout_cost', 0)):.3f}"
+        )
+
+        breakdown = plan.get("breakdown", [])
+        if breakdown:
+            breakdown_df = pd.DataFrame(breakdown).rename(
+                columns={
+                    "topic": "Topic",
+                    "before": "Before",
+                    "after": "After",
+                    "gain_pct": "Gain %",
+                }
+            )
+            st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+
+st.subheader("7) Explanation")
+st.write(result.get("explanation", "No explanation generated."))
+
+st.caption(
+    "Forecasting advantage: compare expected gains and burnout-adjusted utility before committing to a study strategy."
+)
